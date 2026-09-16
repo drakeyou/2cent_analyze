@@ -59,7 +59,7 @@ export const DEFAULTS = {
   // deadline set six hours out for CS2 and a week out for tennis.
   schedule: {
     // Enough lead to have the book before the first point is played.
-    leadMinutes: 10,
+    leadMinutes: 30,
     tickSeconds: 10,
     // How long after the start a match can still be running, per gg.bet
     // sportId. A BO5 Dota series runs longer than a CS2 one.
@@ -103,6 +103,7 @@ export const DEFAULTS = {
   // anything older than the collection has no snapshots behind it.
   fillContext: { settleSeconds: 900, maxAgeHours: 24 },
   book: { heartbeatSeconds: 5, reconnectMinMs: 1000, reconnectMaxMs: 60000 },
+  capture: { enabled: true, checkpointSeconds: 60 },
   // The tick is per-market, not a constant: of the esports markets sampled, 58
   // run at 0.01 and 7 at 0.001. So the bid-drop rule is expressed in ticks of
   // the market itself, with an absolute floor so the 0.001 books do not fire on

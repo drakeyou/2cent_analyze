@@ -8,6 +8,8 @@ data/
 !samples-pm/*.csv
 export/
 export.zip
+research-export*/
+research-export*.zip
 __pycache__/
 *.pyc
 pm-resolutions.csv

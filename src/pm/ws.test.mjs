@@ -124,3 +124,33 @@ await delay(60);
 assert.equal(FakeSocket.instances.length, afterStop, 'a stopped feed does not reconnect');
 
 console.log('all feed tests passed');
+
+// Complete frames and stream invalidation; late events from retired sockets
+// must not clear a replacement book or schedule another reconnect.
+const resets = [];
+const batches = [];
+const raw = makeFeed({ onBatch: (batch, meta) => batches.push([batch, meta]),
+  onReset: (assets, reason) => resets.push([assets, reason]) });
+raw.feed.setAssets(['a', 'b']);
+const old = FakeSocket.instances[0];
+old.emit('open');
+old.emit('message', { data: JSON.stringify([
+  { event_type: 'book', asset_id: 'a' }, { event_type: 'book', asset_id: 'b' },
+]) });
+assert.equal(batches.length, 1);
+assert.equal(batches[0][0].length, 2);
+assert.ok(Number.isFinite(batches[0][1].monotonicMs));
+assert.ok(Number.isFinite(Date.parse(batches[0][1].receivedAt)));
+old.emit('error');
+assert.equal(resets.at(-1)[1], 'error');
+assert.equal(old.closed, true);
+await delay(30);
+const replacement = FakeSocket.instances[1];
+replacement.emit('open');
+const resetCount = resets.length;
+old.emit('close');
+old.emit('message', { data: JSON.stringify({ event_type: 'book', asset_id: 'a' }) });
+assert.equal(resets.length, resetCount);
+assert.equal(batches.length, 1);
+raw.feed.stop();
+assert.equal(resets.at(-1)[1], 'unsubscribe');

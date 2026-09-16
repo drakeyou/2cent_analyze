@@ -10,7 +10,7 @@
     "discover": "node src/monitor.mjs --discover",
     "watch": "node src/monitor.mjs",
     "inspect": "node src/inspect.mjs",
-    "test": "node src/entrypoint.test.mjs && node src/parse.test.mjs && node src/changes.test.mjs && node src/overview.test.mjs && node src/appender.test.mjs && node src/pm/classify.test.mjs && node src/pm/schedule.test.mjs && node src/pm/followups.test.mjs && node src/pm/fill-context.test.mjs && node src/pm/gamma.test.mjs && node src/pm/store.test.mjs && node src/pm/book.test.mjs && node src/pm/ws.test.mjs && node src/pm/match.test.mjs && node src/pm/ggbet-tail.test.mjs && node src/pm/mapping.test.mjs && node src/pm/link.test.mjs && node src/pm/wallets.test.mjs && node src/pm/trades.test.mjs && node src/pm/http.test.mjs && node src/pm/universe.test.mjs && node src/pm/resolve.test.mjs && python3 test_analyze_fills.py && python3 test_export.py && python3 test_bundle.py",
+    "test": "node src/entrypoint.test.mjs && node src/parse.test.mjs && node src/changes.test.mjs && node src/overview.test.mjs && node src/appender.test.mjs && node src/pm/classify.test.mjs && node src/pm/schedule.test.mjs && node src/pm/followups.test.mjs && node src/pm/fill-context.test.mjs && node src/pm/gamma.test.mjs && node src/pm/store.test.mjs && node src/pm/book.test.mjs && node src/pm/ws.test.mjs && node src/pm/match.test.mjs && node src/pm/ggbet-tail.test.mjs && node src/pm/mapping.test.mjs && node src/pm/link.test.mjs && node src/pm/wallets.test.mjs && node src/pm/trades.test.mjs && node src/pm/http.test.mjs && node src/pm/universe.test.mjs && node src/pm/resolve.test.mjs && python3 test_analyze_fills.py && python3 test_export.py && python3 test_bundle.py && node src/pm/capture.test.mjs && python3 test_research.py",
     "pm:markets": "node src/pm/markets.mjs",
     "pm": "node src/pm/collector.mjs",
     "analyze": "python3 analyze.py",
@@ -18,7 +18,9 @@
     "resolve": "node src/pm/resolve.mjs",
     "fills": "python3 analyze_fills.py",
     "clean": "./clean.sh",
-    "check": "python3 check.py"
+    "check": "python3 check.py",
+    "test:pm": "node --test src/pm/*.test.mjs && python3 test_analyze_fills.py && python3 test_export.py && python3 test_bundle.py && python3 test_research.py",
+    "export:research": "python3 research_export.py"
   },
   "dependencies": {
     "playwright": "^1.56.1"

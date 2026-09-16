@@ -24,6 +24,7 @@ from collections import Counter, defaultdict
 
 from analyze import (databases, highs_after, iso_shift, newest, parse_timestamp,
                      query, target_wallets, with_column, with_table)
+from trade_identity import unique_fills
 
 CONTEXT_MINUTES = (1, 5, 15)
 
@@ -372,7 +373,7 @@ def sweep_context(paths, sweeps, starts=None, report_every=100):
 FILE_NOTES = {
     "report.txt": "output of `analyze.py`, the four headline questions",
     "sweeps.csv": "detected book collapses, with the context that prices them",
-    "book-series.csv": "the book around the deepest collapses as a time series,"
+    "book-series.csv": "price-stratified sweep windows (75% budget for <=5c),"
                        " one snapshot every 30s from five minutes before to fifteen"
                        " minutes after",
     "sweeps-strata.csv": "how many significant sweeps each day held, and how many are here",
@@ -380,8 +381,8 @@ FILE_NOTES = {
                    " and the subscription window",
     "target-fills.csv": "fills by the wallets under study in THIS collection,"
                         " tagged maker or taker",
-    "target-fills-prior.csv": "an earlier fills export, if one was in the project root —"
-                              " what `fills-report.txt` and the resolutions were built from",
+    "target-fills-prior.csv": "an earlier export from the project root, retained only"
+                              " for reference; not used for this bundle's PnL report",
     "fill-context.csv": "the book on either side of each wallet fill — the ground truth",
     "coverage.csv": "heartbeats per sport per hour, with the seconds nobody saw",
     "gaps.csv": "websocket disconnects",
@@ -441,11 +442,10 @@ SWEEP_NOTES = {
     "paired_ask": "its best ask",
     "paired_ask_size": "size resting at that ask — how much the floor below is worth"
                        " taking. A bound behind 40 shares is a bound behind 40 shares",
-    "fair_lower_bound": "**the metric.** `1 - paired_ask`. The two tokens pay out one"
-                        " dollar between them, so anything the twin can be bought at"
-                        " puts a floor under this one. No external feed, no name"
-                        " matching: a fill at 0.02 against a floor of 0.15 is a"
-                        " dislocation derived entirely from resting orders",
+    "fair_lower_bound": "`1 - paired_ask`, a complementary-book quote; NOT an"
+                        " independent fair value. Mirrored liquidity can make it"
+                        " identical to this token's bid; sequential legacy updates"
+                        " can create a temporary apparent discrepancy",
     "fair_upper_bound": "`1 - paired_bid`, the ceiling from the same identity",
     "fair_mid": "midpoint of the two bounds",
     "book_sum": "`bid_after + paired_bid`. Near 1 is a working market; near 0 means"
@@ -475,8 +475,10 @@ FILL_NOTES = {
     "side": "BUY or SELL",
     "price": "fill price",
     "size": "fill size",
-    "fill_index": "which fill this is within the position, counting the same side only,"
-                  " so the fourth buy is 4 whatever the sells did",
+    "fill_index": "count of observed fills through this timestamp for the same"
+                  " wallet/token/side in the collector's recent files; older rows"
+                  " can contain duplicates or pooled wallets. Recompute from unique"
+                  " target-fills.csv for comparisons across days",
     "bid_t_minus_60": "best bid a minute before. Empty when no snapshot that close"
                       " exists, rather than filled in from an older one",
     "bid_t_minus_10": "ten seconds before",
@@ -572,6 +574,19 @@ BOOK_SERIES_NOTES = {
 }
 
 
+def select_series(sweeps, cap):
+    """Price strata, not removed-volume rank; missing strata donate slots."""
+    if cap <= 0:
+        return []
+    deep = [s for s in sweeps if s['bid_after'] is not None and s['bid_after'] <= .05]
+    other = [s for s in sweeps if s['bid_after'] is None or s['bid_after'] > .05]
+    cheap_n = min(len(deep), (cap * 3 + 3) // 4)
+    other_n = min(len(other), max(0, cap - cheap_n))
+    cheap_n = min(len(deep), cap - other_n)
+    return sorted(stratify(deep, cheap_n)[0] + stratify(other, other_n)[0],
+                  key=lambda s: s['ts'])
+
+
 def book_series(paths, sweeps, before_minutes=5, after_minutes=15,
                 every_seconds=30, cap=300):
     """The book around a sweep, thinned to one snapshot every half minute.
@@ -584,14 +599,14 @@ def book_series(paths, sweeps, before_minutes=5, after_minutes=15,
     Thinned and windowed because it has to be: the book table is heartbeated
     every five seconds per token and runs to tens of millions of rows a day.
     Twenty minutes at one sample per thirty seconds is forty rows a sweep, and
-    only the deepest few hundred sweeps get one.
+    only a price-stratified sample of sweeps gets one.
     """
     if not sweeps:
         return []
-    # The deepest collapses, since this file exists to be looked at rather than
-    # aggregated: a shallow sweep has no recovery worth plotting.
-    depth = sorted(sweeps, key=lambda s: -(s["size_consumed"] or 0))[:cap]
-    ordered = sorted(depth, key=lambda s: s["ts"])
+    # Large removed SIZE is not a deep PRICE collapse. It selected almost only
+    # 99c books. Reserve 3/4 of the budget for <=5c, stratified across days;
+    # keep the rest for the upper-price leg. Empty strata donate their slots.
+    ordered = select_series(sweeps, cap)
 
     paired = set(with_column(paths, "book", "paired_ask"))
     rows = []
@@ -615,7 +630,7 @@ def book_series(paths, sweeps, before_minutes=5, after_minutes=15,
             twin[row["ts"]] = row
 
         taken = set()
-        for row in window:
+        for row in sorted(window, key=lambda r: r['ts']):
             stamp = parse_timestamp(row["ts"])
             if stamp is None:
                 continue
@@ -662,7 +677,7 @@ def main():
     parser.add_argument("--max-sweeps", type=int, default=5000,
                         help="cap on how many sweeps get the expensive context")
     parser.add_argument("--series-sweeps", type=int, default=300,
-                        help="how many of the deepest sweeps get a book time series;"
+                        help="price-stratified sweep windows (75%% budget for <=5c);"
                              " 0 leaves book-series.csv out")
     args = parser.parse_args()
 
@@ -701,7 +716,7 @@ def main():
         sweep_context(paths, sweeps, starts))
 
     if args.series_sweeps:
-        print(f"building the book series around the {args.series_sweeps} deepest"
+        print(f"building the book series around up to {args.series_sweeps} price-stratified"
               f" sweeps...", flush=True)
         sizes["book-series.csv"] = write_csv(
             os.path.join(args.out, "book-series.csv"), BOOK_SERIES_COLUMNS,
@@ -757,13 +772,14 @@ def main():
             FROM trades t LEFT JOIN markets m ON m.condition_id = t.condition_id
             WHERE lower(t.wallet) IN ({placeholders}) ORDER BY t.ts
         """, wallets)
+        raw_fill_count = len(fills)
+        fills = unique_fills(fills)
+        print(f"  fills: {len(fills)} unique, {raw_fill_count - len(fills)} duplicate copies removed",
+              flush=True)
         # Three things that are cheap here and expensive to reconstruct later.
         #
-        # fill_index is the strongest signal found in the data so far — positions
-        # filled four or more times returned 0.46x against 1.97x for those filled
-        # two or three times — and it is known at the moment of entry. It counts
-        # fills of the same side on the same token, in time order, so the fourth
-        # buy is fill_index 4 whatever the sells did.
+        # Index unique observed fills per wallet, token and side. It is not the
+        # wallet's lifetime fill count when API history or --since is truncated.
         labels = resolution_labels()
         seen_fills = Counter()
         priced_fills = []
@@ -773,7 +789,7 @@ def main():
             for field in ("question", "sport", "market_level", "kind"):
                 if not row.get(field):
                     row[field] = meta.get(field)
-            key = (row["asset_id"], row["side"])
+            key = (row["wallet"].lower(), row["asset_id"], row["side"])
             seen_fills[key] += 1
             row["fill_index"] = seen_fills[key]
             row["minutes_from_game_start"] = minutes_from(
@@ -847,12 +863,11 @@ def main():
     # The wallet side of the study: outcomes, the PnL report built from them,
     # and the positions whose history is incomplete.
     #
-    # The fills to report on are the ones this export just wrote. A project root
-    # may also hold an earlier, larger export; that one wins, because it is what
-    # the resolutions were built from. Looking only at the root file — as this
-    # did — left the report out of every bundle on a machine that never had one.
+    # The fills to report on are the unique ones this export just wrote.
     fills_path = os.path.join(args.out, "target-fills.csv")
-    for_report = next((p for p in ("target-fills.csv", fills_path) if os.path.exists(p)), None)
+    # The report must describe the very fills shipped in this bundle. An old
+    # root CSV must not silently replace this collection's cleaned history.
+    for_report = fills_path if os.path.exists(fills_path) else None
     report_error = None
     if for_report:
         fills_report = subprocess.run(
@@ -987,7 +1002,9 @@ own row.
 The same quantities as `sweeps.csv`, as a series rather than a single instant:
 one snapshot every thirty seconds from five minutes before each collapse to
 fifteen minutes after. A row of `sweeps.csv` cannot show a recovery taking
-shape; this can. Only the deepest few hundred sweeps get one, because the book
+shape; this can. The window budget reserves 75% for bid_after <= 0.05 and the
+rest for higher prices, with day stratification and unused slots redistributed.
+This is a sample of sweeps.csv, not an unbiased sample of all markets. The book
 table is heartbeated every five seconds per token and a full export of it is
 the thing this bundle exists to avoid.
 
@@ -1017,9 +1034,11 @@ the horizons around it had passed.
 - A book *swept* to two cents and a book *resting* at two cents are different
   events; only the first is an opportunity, and `report.txt` reports them
   separately.
-- `fair_lower_bound` is a bound, not a price. It says the token cannot be worth
-  less than that if the twin's ask is real; it does not say anyone will pay it.
-  `paired_ask_size` is how seriously to take it.
+- `fair_lower_bound` is a complementary quote, not independent evidence of fair
+  value. Outcome books can mirror the same liquidity. Older collector versions
+  calculated paired metrics partway through a multi-asset update; apparent
+  dislocations may therefore be timing artefacts. Use the continuous research
+  journal to reconstruct atomic frames and exclude gaps/stale/crossed books.
 - `ggbet_fair` and `dislocation_ratio` are null wherever the market could not be
   matched to gg.bet, which is the great majority of rows. They are kept for
   continuity with earlier extracts; the twin-token columns answer the same

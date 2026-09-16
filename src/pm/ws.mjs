@@ -10,6 +10,7 @@
 // happens when a match starts or ends, not every poll.
 
 const WS_URL = 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
+let connectionSequence = 0;
 
 /** One socket carrying one chunk of the asset list. */
 class Connection {
@@ -23,13 +24,17 @@ class Connection {
   constructor(feed, assets) {
     this.feed = feed;
     this.assets = assets;
+    this.id = `connection-${++connectionSequence}`;
   }
 
   open() {
     const { WebSocketImpl, url } = this.feed;
     this.#ws = new WebSocketImpl(url);
+    const socket = this.#ws;
 
     this.#ws.addEventListener('open', () => {
+      if (this.#stopped || this.#ws !== socket || this.#timer) return;
+      this.feed.onReset?.(this.assets, 'subscribe', { connectionId: this.id });
       this.#attempt = 0;
       if (this.#closedAt !== null) {
         this.feed.onGap({
@@ -55,6 +60,9 @@ class Connection {
     });
 
     this.#ws.addEventListener('message', (event) => {
+      if (this.#stopped || this.#ws !== socket || this.#timer) return;
+      const meta = { connectionId: this.id, receivedAt: new Date().toISOString(),
+        monotonicMs: performance.now() };
       const data = typeof event.data === 'string' ? event.data : String(event.data);
       let parsed;
       try {
@@ -64,18 +72,23 @@ class Connection {
       }
       // The first frame after subscribing is an array of snapshots; later frames
       // are single objects.
-      for (const message of Array.isArray(parsed) ? parsed : [parsed]) {
-        if (message?.event_type) this.feed.onMessage(message);
-      }
+      const batch = (Array.isArray(parsed) ? parsed : [parsed]).filter(m => m?.event_type);
+      if (this.feed.onBatch) this.feed.onBatch(batch, meta);
+      else for (const message of batch) this.feed.onMessage?.(message, meta);
     });
 
-    this.#ws.addEventListener('close', () => this.#down('close'));
-    this.#ws.addEventListener('error', () => this.#down('error'));
+    this.#ws.addEventListener('close', () => {
+      if (this.#ws === socket) this.#down('close');
+    });
+    this.#ws.addEventListener('error', () => {
+      if (this.#ws === socket) this.#down('error');
+    });
   }
 
   #down(reason) {
     clearInterval(this.#keepalive);
     if (this.#stopped || this.#timer) return;
+    this.feed.onReset?.(this.assets, reason, { connectionId: this.id });
     this.#closedAt ??= Date.now();
     const { reconnectMinMs, reconnectMaxMs } = this.feed;
     const wait = Math.min(reconnectMaxMs, reconnectMinMs * 2 ** this.#attempt++);
@@ -85,9 +98,12 @@ class Connection {
       this.open();
     }, wait);
     this.#timer.unref?.();
+    // An error need not emit close. Retire it before opening another socket.
+    try { this.#ws?.close(); } catch { /* already closed */ }
   }
 
   close() {
+    if (!this.#stopped) this.feed.onReset?.(this.assets, 'unsubscribe', { connectionId: this.id });
     this.#stopped = true;
     clearInterval(this.#keepalive);
     clearTimeout(this.#timer);
@@ -105,12 +121,12 @@ export class BookFeed {
   #assets = [];
 
   constructor({
-    onMessage, onGap, onStatus, url = WS_URL, WebSocketImpl = globalThis.WebSocket,
+    onMessage, onBatch, onReset, onGap, onStatus, url = WS_URL, WebSocketImpl = globalThis.WebSocket,
     assetsPerConnection = 250, keepaliveSeconds = 10,
     reconnectMinMs = 1000, reconnectMaxMs = 60000,
   }) {
     Object.assign(this, {
-      onMessage, onGap, onStatus, url, WebSocketImpl,
+      onMessage, onBatch, onReset, onGap, onStatus, url, WebSocketImpl,
       assetsPerConnection, keepaliveSeconds, reconnectMinMs, reconnectMaxMs,
     });
   }

@@ -12,7 +12,29 @@ import { DatabaseSync } from 'node:sqlite';
 import { existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
+// The API repeats history into successive daily files. Missing hashes cannot
+// establish identity; equal-size anonymous prints must not be merged.
+function tradeKey(row) {
+  return row.tx_hash ? JSON.stringify([row.tx_hash.toLowerCase(),
+    row.wallet?.toLowerCase(), row.asset_id, row.side, Number(row.size), Number(row.price)]) : null;
+}
+
 const SCHEMA = `
+CREATE TABLE IF NOT EXISTS market_events (
+  session_id TEXT, seq INTEGER, received_at TEXT, monotonic_ms REAL,
+  connection_id TEXT, event_type TEXT, payload_json TEXT,
+  PRIMARY KEY (session_id, seq)
+);
+CREATE INDEX IF NOT EXISTS market_events_received ON market_events (received_at);
+CREATE TABLE IF NOT EXISTS quote_observations (
+  session_id TEXT, frame_seq INTEGER, received_at TEXT, asset_id TEXT,
+  condition_id TEXT, trigger TEXT, best_bid REAL, best_ask REAL,
+  paired_bid REAL, paired_ask REAL, source_timestamp REAL, paired_source_timestamp REAL,
+  crossed INTEGER, paired_crossed INTEGER, levels_json TEXT,
+  PRIMARY KEY (session_id, frame_seq, asset_id)
+);
+CREATE INDEX IF NOT EXISTS quote_observations_asset_time
+  ON quote_observations (asset_id, received_at);
 CREATE TABLE IF NOT EXISTS markets (
   condition_id TEXT PRIMARY KEY, asset_id_a TEXT, asset_id_b TEXT,
   question TEXT, slug TEXT, event_slug TEXT, event_title TEXT,
@@ -126,6 +148,13 @@ CREATE INDEX IF NOT EXISTS book_bid_asset_ts ON book (best_bid, asset_id, ts);
 `;
 
 const INSERTS = {
+  market_events: `INSERT INTO market_events
+    (session_id, seq, received_at, monotonic_ms, connection_id, event_type, payload_json)
+    VALUES (?,?,?,?,?,?,?)`,
+  quote_observations: `INSERT INTO quote_observations
+    (session_id, frame_seq, received_at, asset_id, condition_id, trigger, best_bid,
+     best_ask, paired_bid, paired_ask, source_timestamp, paired_source_timestamp,
+     crossed, paired_crossed, levels_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   book: `INSERT INTO book VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   sweeps: `INSERT INTO sweeps (ts, asset_id, condition_id, rule, bid_before, bid_after,
     size_consumed, levels_crossed, depth_before, depth_after,
@@ -229,20 +258,23 @@ export function walletDisciplineShares(dir, { days = 7, now = Date.now() } = {})
 
   const since = new Date(now - days * 24 * 3600 * 1000).toISOString();
   const counts = new Map();
+  const seen = new Set();
   let total = 0;
   for (const name of names.slice(-days)) {
     let db;
     try {
       db = new DatabaseSync(join(dir, name), { readOnly: true });
       const rows = db.prepare(`
-        SELECT m.sport AS sport, count(*) AS fills
+        SELECT t.*, m.sport AS sport
         FROM trades t JOIN markets m ON m.condition_id = t.condition_id
         WHERE t.ts >= ? AND m.sport IS NOT NULL
-        GROUP BY m.sport
       `).all(since);
       for (const row of rows) {
-        counts.set(row.sport, (counts.get(row.sport) ?? 0) + row.fills);
-        total += row.fills;
+        const key = tradeKey(row);
+        if (key !== null && seen.has(key)) continue;
+        if (key !== null) seen.add(key);
+        counts.set(row.sport, (counts.get(row.sport) ?? 0) + 1);
+        total++;
       }
     } catch {
       // A file from before these tables existed has nothing to contribute.
@@ -315,7 +347,8 @@ export class Store {
   /** Yesterday's file, read-only, so a fill near midnight still has a context. */
   #history = null;
   #buffers = { book: [], sweeps: [], sweep_followups: [], fill_context: [], joined: [],
-    wallets: [], trades: [], trade_scans: [], universe: [], gaps: [] };
+    wallets: [], trades: [], trade_scans: [], universe: [], gaps: [],
+    market_events: [], quote_observations: [] };
   #flushAt;
   #maxBuffered;
 
@@ -395,6 +428,9 @@ export class Store {
   get path() {
     return join(this.#dir, `pm-${this.#day}.sqlite`);
   }
+
+  /** Rotate before a journal sequence number is reserved. */
+  prepare() { this.#rotateIfNeeded(); }
 
   /** Queue a row; it reaches disk on the next flush. */
   add(table, row) {
@@ -509,14 +545,22 @@ export class Store {
    * is pulled in pages and deduplicated on insert, so a running counter would
    * be wrong after a restart or a backfill.
    */
-  fillOrdinal(assetId, side, ts) {
+  fillOrdinal(assetId, side, ts, wallet = null) {
     let total = 0;
+    const seen = new Set();
     for (const db of [this.#history, this.#db]) {
       if (!db) continue;
       try {
-        total += db.prepare(
-          'SELECT count(*) AS c FROM trades WHERE asset_id = ? AND side = ? AND ts <= ?',
-        ).get(assetId, side, ts).c;
+        const rows = db.prepare(
+          'SELECT * FROM trades WHERE asset_id = ? AND side = ? AND ts <= ?' +
+          (wallet ? ' AND lower(wallet) = ?' : ''),
+        ).all(assetId, side, ts, ...(wallet ? [wallet.toLowerCase()] : []));
+        for (const row of rows) {
+          const key = tradeKey(row);
+          if (key !== null && seen.has(key)) continue;
+          if (key !== null) seen.add(key);
+          total++;
+        }
       } catch {
         // Same as above: an older file may not carry the table at all.
       }

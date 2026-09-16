@@ -16,8 +16,9 @@ import { fetchActiveMarkets, MarketRegistry } from './gamma.mjs';
 import { MarketSchedule } from './schedule.mjs';
 import { FollowupTracker, sweepIdOf } from './followups.mjs';
 import { FillContextQueue, contextRow } from './fill-context.mjs';
-import { BookState, SweepDetector, bookSum, internalDislocation, pairedView } from './book.mjs';
+import { SweepDetector, bookSum, internalDislocation, pairedView } from './book.mjs';
 import { BookFeed } from './ws.mjs';
+import { MarketCapture } from './capture.mjs';
 import { Store, restoreSchedulableMarkets, walletDisciplineShares } from './store.mjs';
 import { GgbetTail } from './ggbet-tail.mjs';
 import { MappingTable } from './mapping.mjs';
@@ -37,6 +38,7 @@ const once = process.argv.includes('--once');
 const store = new Store(config.storage.dir, {
   onRotate: (day) => {
     for (const entry of schedule.live()) store.upsertMarket(entry.record, undefined, entry);
+    capture.checkpoint();
     console.error(`[store] rolled over to ${day}, re-registered ${schedule.liveSize} markets`);
   },
 });
@@ -75,8 +77,7 @@ const tradesPolledAt = new Map();
 const now = () => new Date().toISOString();
 
 /** Record the book, and whatever the update did to it. */
-function record(book, before, trigger) {
-  const ts = now();
+function record(book, before, trigger, ts = now()) {
   const at = Date.parse(ts);
   const link = links.get(book.assetId);
   const ggbet = link ? ggbetByKey.get(link.ggbetKey) : null;
@@ -166,6 +167,14 @@ function relink() {
   return links.size;
 }
 
+const capture = new MarketCapture({ store, books,
+  pairOf: asset => schedule.pairOf(asset), onBook: record,
+  onForget: asset => detector.forget(asset), depthAbovePrice: config.sweep.depthAbovePrice,
+  enabled: config.capture.enabled,
+});
+capture.write('capture_start', { version: 1, wallets: config.wallets.addresses,
+  watch_prices: capture.prices, config });
+
 const feed = new BookFeed({
   ...config.book,
   onStatus: (text) => console.error(`[feed] ${text}`),
@@ -174,25 +183,10 @@ const feed = new BookFeed({
     console.error(`[feed] gap ${Math.round(gap.durationMs / 1000)}s over ${gap.assets} assets`);
     store.add('gaps', [gap.startedAt, gap.endedAt, gap.durationMs, gap.reason, gap.assets]);
   },
-  onMessage: (message) => {
-    counts.messages++;
-    if (message.event_type === 'book') {
-      const book = books.get(message.asset_id)
-        ?? new BookState(message.asset_id, { conditionId: message.market });
-      books.set(message.asset_id, book);
-      const before = SweepDetector.snapshot(book, config.sweep.depthAbovePrice);
-      book.applyBook(message);
-      record(book, before, 'book');
-      return;
-    }
-    if (message.event_type !== 'price_change') return; // last_trade_price is a print
-    for (const entry of message.price_changes ?? []) {
-      const book = books.get(entry.asset_id);
-      if (!book) continue; // no snapshot yet; the next `book` frame resyncs us
-      const before = SweepDetector.snapshot(book, config.sweep.depthAbovePrice);
-      book.applyPriceChange(entry, message.timestamp);
-      record(book, before, 'change');
-    }
+  onReset: (assets, reason, meta) => capture.reset(assets, reason, meta),
+  onBatch: (messages, meta) => {
+    counts.messages += messages.length;
+    capture.processBatch(messages, meta);
   },
 });
 
@@ -202,7 +196,20 @@ function heartbeat() {
 }
 
 /** Target-wallet fills, the only labelled examples available. */
+let walletsPolling = false;
 async function pollWallets() {
+  if (walletsPolling) return;
+  walletsPolling = true;
+  try {
+    await pollWalletsOnce();
+  } catch (err) {
+    console.error(`[wallets] ${err.message}`);
+  } finally {
+    walletsPolling = false;
+  }
+}
+
+async function pollWalletsOnce() {
   // condition id -> when the wallet last touched it, so a market it traded in
   // months ago is not taken up as if it were live.
   const markets = new Map();
@@ -507,6 +514,7 @@ const timers = [
   setInterval(() => checkResolutions().catch((err) => console.error(`[resolve] ${err.message}`)),
     (config.schedule?.resolutionCheckOpenHorizonSeconds ?? 60) * 1000),
   setInterval(heartbeat, config.book.heartbeatSeconds * 1000),
+  setInterval(() => capture.checkpoint(), Math.max(5, config.capture.checkpointSeconds) * 1000),
   setInterval(relink, (config.ggbet.pollSeconds ?? 5) * 1000),
   setInterval(() => pollWallets(), (config.wallets.intervalSeconds ?? 25) * 1000),
   // Where the wallets work shifts between days, not between minutes.
@@ -515,6 +523,7 @@ const timers = [
     console.error(`[status] ${books.size} books | ${counts.rows} rows | ${counts.joined} joined` +
       ` | ${counts.sweeps} sweeps (${counts.followups} horizons) | ${counts.gaps} gaps` +
       ` | ${links.size} linked | ${counts.trades} trades` +
+      ` | journal ${capture.enabled ? capture.seq : 'off'}` +
       ` | live ${schedule.liveSize}/waiting ${schedule.pendingSize}` +
       ` | ${counts.observed} seen in play | ${counts.contexts} fills in context` +
       `${counts.unwatchableFills ? ` (${counts.unwatchableFills} fills in markets` +
