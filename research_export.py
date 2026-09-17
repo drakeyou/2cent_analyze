@@ -16,13 +16,15 @@ from pathlib import Path
 
 from analyze import databases
 from trade_identity import unique_fills
+from order_research import export_orders, load_wallets, write_csv
+from order_context import creation_context
 
 
 def columns(db, table):
     return [r['name'] for r in db.execute(f'PRAGMA table_info({table})')]
 
 
-def export_research(paths, out):
+def export_research(paths, out, order_db=None, wallets=None, context_paths=None):
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     if any(out.iterdir()):
@@ -107,6 +109,16 @@ def export_research(paths, out):
                 writer.writerow({**row, 'fill_index': indices[key]})
         if not counts['market_events']:
             manifest['warnings'].append('No raw events: collect with capture.enabled=true first')
+        if order_db and Path(order_db).exists():
+            days = sorted(Path(p).name[3:13] for p in paths)
+            orders, order_counts = export_orders(order_db, out, wallets or set(), days[0], days[-1])
+            contexts = creation_context(orders, context_paths or paths)
+            write_csv(out / 'order-creation-context.csv', contexts)
+            counts.update(order_counts)
+            counts['order_creation_context'] = len(contexts)
+            manifest['order_context_statuses'] = dict(Counter(r['context_status'] for r in contexts))
+        elif order_db:
+            manifest['warnings'].append('No order database: run npm run pm:orders alongside the collector')
         manifest['counts'] = dict(counts)
         (out / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
         (out / 'README.md').write_text(README, encoding='utf-8')
@@ -167,6 +179,22 @@ Files may be large. Every database is read from a consistent SQLite snapshot.
 - `gaps.csv.gz`: legacy socket outage summaries; use asset-specific raw resets
   and the next full snapshot to invalidate research intervals precisely.
 
+## Signed order enrichment (when the separate order collector has run)
+
+- `chain-fills.csv`: every target receipt fill, keyed by chain/tx/log_index. No price-based exclusions.
+- `signed-orders.csv`: unique chain/exchange/order_hash; original limit/amounts and signed client time,
+  first/last OBSERVED fill, cumulative observed shares. Taker price improvement is retained.
+- `counterparty-fills.csv`: all other fills in the same transactions, including the single aggregate taker.
+- `order-creation-context.csv`: latest anonymous book BEFORE client creation minus 60/10/1/0 seconds.
+  Context status rejects missing/stale/crossed/reset intervals. Source/sample age and raw quote are retained.
+  Clock offsets are unknown; available does NOT certify causal ordering or continuous resting.
+- `chain-rpc.jsonl.gz`: original selected tx/receipt/block responses for offline verification.
+- `order-errors.csv`: unresolved decode/RPC errors across the whole order cache (not date-filtered).
+
+Dates filter fills by block time. First observed means within THIS export, not first lifetime fill.
+The client timestamp is not posting or exchange acknowledgement time. Fill age is not refresh period.
+No fills/receipts for cancelled unfilled orders exist in this dataset. No resting ownership is inferred.
+
 ## Interpretation
 
 Resting levels are anonymous aggregated liquidity. A size change can be an order,
@@ -192,6 +220,8 @@ def main():
     parser.add_argument('--db', default='data')
     parser.add_argument('--since', type=date_argument)
     parser.add_argument('--until', type=date_argument)
+    parser.add_argument('--orders', help='signed-order SQLite, defaults to <db>/order-research.sqlite')
+    parser.add_argument('--config', default='pm.config.json')
     parser.add_argument('--out', default='research-export-' +
                         dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d-%H%M%S'))
     args = parser.parse_args()
@@ -200,7 +230,8 @@ def main():
         paths = [p for p in paths if Path(p).name[3:13] <= args.until]
     if not paths:
         parser.error('no daily databases in the requested date range')
-    result = export_research(paths, args.out)
+    result = export_research(paths, args.out, args.orders or str(Path(args.db)/'order-research.sqlite'),
+                             load_wallets(args.config), databases(args.db, None))
     print(f'Wrote {args.out}/ and {args.out}.zip')
     print(json.dumps(result['counts'], indent=2))
     for warning in result['warnings']:

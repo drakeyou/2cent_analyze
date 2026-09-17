@@ -23,17 +23,16 @@ export const DEFAULTS = {
     wta: 'tennis',
     tennis: 'tennis',
     codmw: 'esports_call_of_duty',
+    itf: 'tennis', // Explicit research coverage; shares the capped tennis budget.
+    mlb: 'baseball',
   },
-  // Sports the wallets trade but the book logger does not subscribe to. Used
+  // Additional naming aliases; only entries in disciplines are subscribed. Used
   // only to name a market after the fact: `disciplines` decides what gets
   // watched, `labels` decides what can be labelled, and conflating them would
   // silently widen the subscription universe.
   labels: {
-    // Watched until the subscription window moved onto the match clock. ITF and
-    // Setka Cup are created in batches of a thousand at a time and are played
-    // around the clock, so watching every one of them through its match was
-    // eight times the book volume of the whole collection so far. They stay
-    // here so a wallet trade in one still gets a name.
+    // ITF is explicitly enabled above with per-sport limits for this research.
+    // Setka remains naming-only; do not merge the two maps.
     itf: 'tennis',
     setka: 'table_tennis',
     setkameua: 'table_tennis',
@@ -84,6 +83,7 @@ export const DEFAULTS = {
     // to have on Polymarket — and a market a wallet is already in never waits,
     // whatever the ceiling says.
     maxLiveMarkets: null,
+    maxLivePerSport: 150,
     // Resolution is what really ends a subscription; the hold above is the
     // backstop. Asking costs one CLOB request per market, so it starts only
     // once the match could plausibly be over.
