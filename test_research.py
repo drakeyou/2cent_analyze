@@ -45,12 +45,15 @@ with tempfile.TemporaryDirectory() as tmp:
       capture.processBatch([{event_type:'last_trade_price',asset_id:'a',price:'.02',size:'10'}]);
       capture.checkpoint();
       store.add('trades', ['2026-09-16T12:00:00Z','c','a','0xa','BUY',.02,10,'maker','0xabc']);
+      store.add('universe', ['2026-09-16T12:00:00Z','c','gamma',0,null,'capacity','A vs B','tennis','match','winner']);
+      store.add('universe', ['2026-09-16T12:00:00Z','c','gamma',1,null,'','A vs B','tennis','match','winner']);
       store.close();
     """
     subprocess.run(['node', '--input-type=module', '-e', script, str(data)], cwd=ROOT, check=True)
     first = data / 'pm-2026-09-16.sqlite'
     second = data / 'pm-2026-09-17.sqlite'
     with sqlite3.connect(first) as a, sqlite3.connect(second) as b:
+        assert a.execute('SELECT subscribed,reason_skipped FROM universe WHERE condition_id="c"').fetchone() == (1, '')
         a.backup(b)
         b.execute('DELETE FROM market_events')
         b.execute('DELETE FROM quote_observations')
@@ -70,6 +73,12 @@ with tempfile.TemporaryDirectory() as tmp:
         fills = list(csv.DictReader(handle))
     assert len(fills) == 1 and fills[0]['fill_index'] == '1'
     assert Path(str(out) + '.zip').exists()
+    # A later daily DB contains only re-polled history, not new fills.
+    history = export_research([second], Path(tmp) / 'history')
+    assert history['counts']['target_fills_in_selected_days'] == 0
+    assert history['counts']['historical_api_fills'] == 1
+    with (Path(tmp) / 'history' / 'historical-target-fills.csv').open() as handle:
+        assert len(list(csv.DictReader(handle))) == 1
     try:
         export_research([first], out)
     except ValueError:

@@ -5,9 +5,8 @@
 // written to the `gaps` table, and the analyzer subtracts those windows instead
 // of dividing by a coverage it never had.
 //
-// Subscriptions are set at connect time, so changing the asset list reconnects
-// that chunk. Discovery only reports genuine additions and removals, so this
-// happens when a match starts or ends, not every poll.
+// Change subscriptions in place. Unrelated market additions must never erase
+// the books whose cancellation/replace cycles we are measuring.
 
 const WS_URL = 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
 let connectionSequence = 0;
@@ -20,6 +19,7 @@ class Connection {
   #attempt = 0;
   #closedAt = null;
   #stopped = false;
+  #ready = false;
 
   constructor(feed, assets) {
     this.feed = feed;
@@ -34,6 +34,7 @@ class Connection {
 
     this.#ws.addEventListener('open', () => {
       if (this.#stopped || this.#ws !== socket || this.#timer) return;
+      this.#ready = true;
       this.feed.onReset?.(this.assets, 'subscribe', { connectionId: this.id });
       this.#attempt = 0;
       if (this.#closedAt !== null) {
@@ -72,7 +73,9 @@ class Connection {
       }
       // The first frame after subscribing is an array of snapshots; later frames
       // are single objects.
-      const batch = (Array.isArray(parsed) ? parsed : [parsed]).filter(m => m?.event_type);
+      const batch = (Array.isArray(parsed) ? parsed : [parsed]).filter(m => m?.event_type
+        // A queued snapshot after unsubscribe must not resurrect a retired book.
+        && (m.event_type !== 'book' || this.assets.includes(m.asset_id)));
       if (this.feed.onBatch) this.feed.onBatch(batch, meta);
       else for (const message of batch) this.feed.onMessage?.(message, meta);
     });
@@ -86,6 +89,7 @@ class Connection {
   }
 
   #down(reason) {
+    this.#ready = false;
     clearInterval(this.#keepalive);
     if (this.#stopped || this.#timer) return;
     this.feed.onReset?.(this.assets, reason, { connectionId: this.id });
@@ -102,9 +106,30 @@ class Connection {
     try { this.#ws?.close(); } catch { /* already closed */ }
   }
 
+  setAssets(assets) {
+    const previous = new Set(this.assets);
+    const desired = new Set(assets);
+    const removed = this.assets.filter(a => !desired.has(a));
+    const added = assets.filter(a => !previous.has(a));
+    this.assets = assets;
+    if (removed.length) this.feed.onReset?.(removed, 'unsubscribe', { connectionId: this.id });
+    // While connecting/reconnecting, open() will subscribe to the latest set.
+    if (!this.#ready || this.#stopped) return;
+    try {
+      if (removed.length) this.#ws.send(JSON.stringify({ assets_ids: removed, operation: 'unsubscribe' }));
+      if (added.length) {
+        this.feed.onReset?.(added, 'subscribe', { connectionId: this.id });
+        this.#ws.send(JSON.stringify({ assets_ids: added, operation: 'subscribe' }));
+      }
+    } catch {
+      this.#down('subscription_error');
+    }
+  }
+
   close() {
     if (!this.#stopped) this.feed.onReset?.(this.assets, 'unsubscribe', { connectionId: this.id });
     this.#stopped = true;
+    this.#ready = false;
     clearInterval(this.#keepalive);
     clearTimeout(this.#timer);
     try {
@@ -144,10 +169,21 @@ export class BookFeed {
     const next = [...new Set(assetIds)].sort();
     if (next.join() === this.#assets.join()) return false;
     this.#assets = next;
-    for (const connection of this.#connections) connection.close();
-    this.#connections = [];
-    for (let i = 0; i < next.length; i += this.assetsPerConnection) {
-      const connection = new Connection(this, next.slice(i, i + this.assetsPerConnection));
+    const desired = new Set(next);
+    const existing = new Set(this.#connections.flatMap(c => c.assets));
+    const additions = next.filter(a => !existing.has(a));
+    const retained = [];
+    for (const connection of this.#connections) {
+      const members = connection.assets.filter(a => desired.has(a));
+      members.push(...additions.splice(0, Math.max(0, this.assetsPerConnection - members.length)));
+      if (members.length) {
+        connection.setAssets(members);
+        retained.push(connection);
+      } else connection.close();
+    }
+    this.#connections = retained;
+    for (let i = 0; i < additions.length; i += this.assetsPerConnection) {
+      const connection = new Connection(this, additions.slice(i, i + this.assetsPerConnection));
       this.#connections.push(connection);
       connection.open();
     }
@@ -157,5 +193,6 @@ export class BookFeed {
   stop() {
     for (const connection of this.#connections) connection.close();
     this.#connections = [];
+    this.#assets = [];
   }
 }

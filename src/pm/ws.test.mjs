@@ -75,9 +75,15 @@ assert.equal(messages.length, 3, 'frames without an event_type are ignored');
 // --- unchanged sets must not churn the sockets ------------------------------
 assert.equal(feed.setAssets(['b', 'a']), false, 'the same set in another order is a no-op');
 assert.equal(FakeSocket.instances.length, 1, 'no reconnect for an unchanged set');
-assert.equal(feed.setAssets(['a', 'b', 'c']), true, 'a genuine change reconnects');
-assert.equal(FakeSocket.instances.length, 2);
-assert.ok(FakeSocket.instances[0].closed, 'the previous socket is closed');
+assert.equal(feed.setAssets(['a', 'b', 'c']), true, 'a genuine change updates the live socket');
+assert.equal(FakeSocket.instances.length, 1);
+assert.equal(socket.closed, false, 'existing books stay connected');
+assert.deepEqual(JSON.parse(socket.sent.at(-1)), {assets_ids:['c'], operation:'subscribe'});
+feed.setAssets(['a', 'c']);
+assert.deepEqual(JSON.parse(socket.sent.at(-1)), {assets_ids:['b'], operation:'unsubscribe'});
+const beforeLate = messages.length;
+socket.emit('message', {data:JSON.stringify({event_type:'book',asset_id:'b'})});
+assert.equal(messages.length, beforeLate, 'late removed-token snapshots do not resurrect books');
 feed.stop();
 
 // --- chunking ---------------------------------------------------------------
@@ -88,6 +94,11 @@ assert.equal(FakeSocket.instances.length, 3);
 FakeSocket.instances.forEach((s) => s.emit('open'));
 const subscribed = FakeSocket.instances.flatMap((s) => JSON.parse(s.sent[0]).assets_ids);
 assert.deepEqual(subscribed.sort(), ['a', 'b', 'c', 'd', 'e'], 'every asset lands on exactly one socket');
+many.feed.setAssets(['a','b','c','d','e','f']);
+assert.equal(FakeSocket.instances.length, 3, 'adding fills spare capacity without reconnects');
+assert.equal(FakeSocket.instances[0].sent.length, 1, 'unrelated full socket untouched');
+many.feed.setAssets(['a','c','d','e','f','g']);
+assert.deepEqual(JSON.parse(FakeSocket.instances[0].sent.at(-1)), {assets_ids:['g'],operation:'subscribe'});
 many.feed.stop();
 
 // --- reconnect and the gap record -------------------------------------------
@@ -154,3 +165,19 @@ assert.equal(resets.length, resetCount);
 assert.equal(batches.length, 1);
 raw.feed.stop();
 assert.equal(resets.at(-1)[1], 'unsubscribe');
+
+const changing = makeFeed();
+changing.feed.setAssets(['a']);
+changing.feed.setAssets(['a','b']);
+const pending = FakeSocket.instances[0];
+pending.emit('open');
+assert.deepEqual(JSON.parse(pending.sent[0]).assets_ids, ['a','b']);
+pending.emit('error');
+changing.feed.setAssets(['b','c']);
+await delay(30);
+const reconnected = FakeSocket.instances[1];
+reconnected.emit('open');
+assert.deepEqual(JSON.parse(reconnected.sent[0]).assets_ids, ['b','c'], 'reconnect uses latest membership');
+changing.feed.stop();
+assert.equal(changing.feed.setAssets(['b','c']), true, 'feed can restart after stop');
+changing.feed.stop();

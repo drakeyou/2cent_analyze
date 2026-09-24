@@ -97,6 +97,16 @@ def export_research(paths, out, order_db=None, wallets=None, context_paths=None)
         fills = unique_fills(fills)
         counts['unique_fills'] = len(fills)
         counts['duplicate_fills_removed'] = counts['fill_copies'] - len(fills)
+        # API history is re-read into today's database. Daily file date alone
+        # must not turn September 4 fills into September 19 research examples.
+        days = {Path(p).name[3:13] for p in paths}
+        historical = [r for r in fills if str(r.get('ts', ''))[:10] not in days]
+        fills = [r for r in fills if str(r.get('ts', ''))[:10] in days]
+        counts['historical_api_fills'] = len(historical)
+        counts['target_fills_in_selected_days'] = len(fills)
+        write_csv(out / 'historical-target-fills.csv', historical)
+        if historical:
+            manifest['warnings'].append(f'{len(historical)} API history fills fall outside selected UTC days; see historical-target-fills.csv')
         header = list(dict.fromkeys(c for row in fills for c in row))
         header = [c for c in header if c != 'fill_index'] + ['fill_index']
         indices = Counter()
@@ -167,15 +177,21 @@ Files may be large. Every database is read from a consistent SQLite snapshot.
   `crossed` and `paired_crossed`: 1 means bid > ask; null means no two-sided book.
   Source timestamps are exchange epoch milliseconds; receive times are UTC ISO.
   `monotonic_ms` in the journal is process-local, comparable only within session.
-- `target-fills.csv`: unique observed economic fills across daily copies, keyed
+- `target-fills.csv`: unique observed economic fills whose trade timestamps fall
+  in selected UTC daily files, keyed
   by tx hash, wallet, token, side, size and price; no-hash records are retained.
   Equal API rows cannot distinguish multiple identical logs inside a transaction.
   `fill_index` is within this export, per wallet/token/side, not lifetime history.
+- `historical-target-fills.csv`: deduplicated API history outside those UTC days;
+  retained separately instead of being mistaken for current coverage.
 - `markets.csv.gz`: daily market registries, including paired token identifiers,
   labels and subscription windows. Preserve provenance; later files have newer
   metadata, not necessarily information that was known at a past decision time.
-- `universe.csv.gz`: discovery and scheduling decisions, including markets not
-  subscribed. This describes discovery coverage, not every market on Polymarket.
+- `universe.csv.gz`: discovery records. Since the September 19 fix, subscribed
+  means actually selected by the scheduler at least once, not mere eligibility.
+  Raw `schedule_decision` events record changing window/capacity/release reasons.
+  Socket health still requires resets and full snapshots. Older files cannot be
+  retroactively corrected. Discovery does not cover every Polymarket market.
 - `gaps.csv.gz`: legacy socket outage summaries; use asset-specific raw resets
   and the next full snapshot to invalidate research intervals precisely.
 

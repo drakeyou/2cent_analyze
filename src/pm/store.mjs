@@ -176,7 +176,8 @@ const INSERTS = {
   trades: `INSERT OR IGNORE INTO trades VALUES (?,?,?,?,?,?,?,?,?)`,
   trade_scans: `INSERT INTO trade_scans VALUES (?,?,?,?,?,?,?)`,
   universe: `INSERT INTO universe VALUES (?,?,?,?,?,?,?,?,?,?)
-    ON CONFLICT(condition_id) DO UPDATE SET unsubscribed_at = excluded.unsubscribed_at`,
+    ON CONFLICT(condition_id) DO UPDATE SET unsubscribed_at = excluded.unsubscribed_at,
+      subscribed = MAX(universe.subscribed, excluded.subscribed), reason_skipped = excluded.reason_skipped`,
   gaps: `INSERT INTO gaps VALUES (?,?,?,?,?)`,
 };
 

@@ -30,7 +30,12 @@ const fresh = journal.observe([
 ]);
 assert.equal(fresh.length, 3, 'everything considered is journalled, not just what was kept');
 assert.equal(journal.size, 3);
+assert.equal(journal.subscribedCount, 0, 'eligible is not yet subscribed');
+assert.equal(journal.decision('c1','capacity').reasonSkipped, 'capacity');
+assert.equal(journal.subscribedCount, 0);
+assert.equal(journal.decision('c1','subscribed').subscribed, true);
 assert.equal(journal.subscribedCount, 1);
+assert.equal(journal.decision('c1','subscribed'), null, 'unchanged decisions are not repeated');
 
 // The reason is the whole point: "the bot never traded here" and "we never
 // looked here" are different claims about the same empty cell.

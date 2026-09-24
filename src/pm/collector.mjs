@@ -25,6 +25,7 @@ import { MappingTable } from './mapping.mjs';
 import { buildLinks, joinedRow, quoteFor } from './link.mjs';
 import { fetchActivity } from './wallets.mjs';
 import { fetchTrades } from './trades.mjs';
+import { dueTradeMarkets } from './trade-poll.mjs';
 import { UniverseJournal, universeRow } from './universe.mjs';
 import { fetchResolution } from './resolve.mjs';
 import { politeFetch, throttle } from './http.mjs';
@@ -73,6 +74,9 @@ const walletMarkets = new Map();
 let quota = new Map();
 /** condition id -> when its trade log was last pulled, to keep polling bounded. */
 const tradesPolledAt = new Map();
+const tradeMarkets = new Map();
+let tradesPolling = false;
+const scheduleDecisions = new Map();
 
 const now = () => new Date().toISOString();
 
@@ -232,7 +236,7 @@ async function pollWalletsOnce() {
     }
   }
   await followWallets(markets);
-  await pollTrades(markets.keys());
+  for (const [id,at] of markets) tradeMarkets.set(id, Math.max(tradeMarkets.get(id) ?? 0,at));
 }
 
 /**
@@ -297,17 +301,21 @@ async function followWallets(lastTraded) {
  * Markets per cycle are capped, so one round stays bounded however long the
  * wallet has been trading.
  */
-async function pollTrades(conditionIds) {
+async function pollTrades() {
+  if (tradesPolling) return;
+  tradesPolling = true;
+  try { await pollTradesOnce(); }
+  catch (err) { console.error(`[trades] ${err.message}`); }
+  finally { tradesPolling = false; }
+}
+
+async function pollTradesOnce() {
   const every = (config.trades?.intervalSeconds ?? 120) * 1000;
   const perCycle = config.trades?.marketsPerCycle ?? 25;
   const targets = new Set((config.wallets.addresses ?? []).map((a) => a.toLowerCase()));
 
-  let scanned = 0;
-  for (const conditionId of conditionIds) {
-    if (scanned >= perCycle) break;
-    if (Date.now() - (tradesPolledAt.get(conditionId) ?? 0) < every) continue;
+  for (const conditionId of dueTradeMarkets(tradeMarkets, tradesPolledAt, {every,limit:perCycle})) {
     tradesPolledAt.set(conditionId, Date.now());
-    scanned++;
     try {
       const { rows, truncated, takerShare, pages } = await fetchTrades(conditionId);
       const mine = rows.filter((row) => targets.has(row[3]));
@@ -387,6 +395,18 @@ function tick(at = Date.now()) {
     maxLivePerSport: config.schedule?.maxLivePerSport ?? Infinity,
     quota,
   });
+  for (const decision of schedule.decisions(at)) {
+    const serialized = JSON.stringify(decision);
+    if (scheduleDecisions.get(decision.conditionId) === serialized) continue;
+    scheduleDecisions.set(decision.conditionId, serialized);
+    capture.write('schedule_decision', decision, {receivedAt:new Date(at).toISOString()});
+    for (const row of universe.observe([schedule.entry(decision.conditionId).record], 'schedule:restored')) {
+      store.add('universe', universeRow(row));
+    }
+    const row = universe.decision(decision.conditionId, decision.status,
+      decision.releasedAt ?? new Date(at).toISOString());
+    if (row) store.add('universe', universeRow(row));
+  }
   for (const entry of removed) {
     const released = universe.release(entry.conditionId);
     if (released) store.add('universe', universeRow(released));
@@ -478,6 +498,7 @@ tick();
 relink();
 await pollWallets();
 if (once) {
+  await pollTrades();
   const segment = tracked.filter((r) => r.level === 'segment').length;
   console.log(`tracking ${tracked.length} markets (${segment} in-match), database ${store.path}`);
   console.log(`schedule: ${schedule.liveSize} live now, ${schedule.pendingSize} waiting for their game`);
@@ -502,6 +523,7 @@ if (once) {
   process.exit(0);
 }
 
+void pollTrades();
 const timers = [
   setInterval(() => discover().catch((err) => console.error(`[discovery] ${err.message}`)),
     config.gamma.intervalSeconds * 1000),
@@ -517,6 +539,7 @@ const timers = [
   setInterval(() => capture.checkpoint(), Math.max(5, config.capture.checkpointSeconds) * 1000),
   setInterval(relink, (config.ggbet.pollSeconds ?? 5) * 1000),
   setInterval(() => pollWallets(), (config.wallets.intervalSeconds ?? 25) * 1000),
+  setInterval(() => pollTrades(), (config.trades?.intervalSeconds ?? 120) * 1000),
   // Where the wallets work shifts between days, not between minutes.
   setInterval(() => { quota = walletDisciplineShares(config.storage.dir); }, 24 * 3600 * 1000),
   setInterval(() => {
