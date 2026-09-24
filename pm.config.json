@@ -11,7 +11,9 @@
     "atp": "tennis",
     "wta": "tennis",
     "tennis": "tennis",
-    "codmw": "esports_call_of_duty"
+    "codmw": "esports_call_of_duty",
+    "itf": "tennis",
+    "mlb": "baseball"
   },
   "gamma": {
     "intervalSeconds": 45,
@@ -19,7 +21,7 @@
     "maxPages": 12
   },
   "schedule": {
-    "leadMinutes": 10,
+    "leadMinutes": 30,
     "tickSeconds": 10,
     "holdHours": {
       "esports_counter_strike": 6,
@@ -56,6 +58,10 @@
     "reconnectMinMs": 1000,
     "reconnectMaxMs": 60000
   },
+  "capture": {
+    "enabled": true,
+    "checkpointSeconds": 60
+  },
   "sweep": {
     "levelsCrossed": 3,
     "bidDropTicks": 3,
@@ -72,7 +78,10 @@
     "intervalSeconds": 25,
     "followHours": 48,
     "addresses": [
-      "0xd403596d8690210994e7f4bae6b9dac1b7e4a817"
+      "0xd403596d8690210994e7f4bae6b9dac1b7e4a817",
+      "0xe0f6ee3a23385afdf446c324f9fb69364a272ee6",
+      "0x8840126a43353f6cdcd77e90bf2327474a4ef51a",
+      "0xdaffa580bde56e654dc9e0c22b6464993aba5cb1"
     ]
   },
   "ggbet": {

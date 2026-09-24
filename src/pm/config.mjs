@@ -23,17 +23,16 @@ export const DEFAULTS = {
     wta: 'tennis',
     tennis: 'tennis',
     codmw: 'esports_call_of_duty',
+    itf: 'tennis', // Explicit research coverage; shares the capped tennis budget.
+    mlb: 'baseball',
   },
-  // Sports the wallets trade but the book logger does not subscribe to. Used
+  // Additional naming aliases; only entries in disciplines are subscribed. Used
   // only to name a market after the fact: `disciplines` decides what gets
   // watched, `labels` decides what can be labelled, and conflating them would
   // silently widen the subscription universe.
   labels: {
-    // Watched until the subscription window moved onto the match clock. ITF and
-    // Setka Cup are created in batches of a thousand at a time and are played
-    // around the clock, so watching every one of them through its match was
-    // eight times the book volume of the whole collection so far. They stay
-    // here so a wallet trade in one still gets a name.
+    // ITF is explicitly enabled above with per-sport limits for this research.
+    // Setka remains naming-only; do not merge the two maps.
     itf: 'tennis',
     setka: 'table_tennis',
     setkameua: 'table_tennis',
@@ -59,7 +58,7 @@ export const DEFAULTS = {
   // deadline set six hours out for CS2 and a week out for tennis.
   schedule: {
     // Enough lead to have the book before the first point is played.
-    leadMinutes: 10,
+    leadMinutes: 30,
     tickSeconds: 10,
     // How long after the start a match can still be running, per gg.bet
     // sportId. A BO5 Dota series runs longer than a CS2 one.
@@ -84,6 +83,7 @@ export const DEFAULTS = {
     // to have on Polymarket — and a market a wallet is already in never waits,
     // whatever the ceiling says.
     maxLiveMarkets: null,
+    maxLivePerSport: 150,
     // Resolution is what really ends a subscription; the hold above is the
     // backstop. Asking costs one CLOB request per market, so it starts only
     // once the match could plausibly be over.
@@ -103,6 +103,7 @@ export const DEFAULTS = {
   // anything older than the collection has no snapshots behind it.
   fillContext: { settleSeconds: 900, maxAgeHours: 24 },
   book: { heartbeatSeconds: 5, reconnectMinMs: 1000, reconnectMaxMs: 60000 },
+  capture: { enabled: true, checkpointSeconds: 60 },
   // The tick is per-market, not a constant: of the esports markets sampled, 58
   // run at 0.01 and 7 at 0.001. So the bid-drop rule is expressed in ticks of
   // the market itself, with an absolute floor so the 0.001 books do not fire on

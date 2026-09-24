@@ -16,14 +16,16 @@ import { fetchActiveMarkets, MarketRegistry } from './gamma.mjs';
 import { MarketSchedule } from './schedule.mjs';
 import { FollowupTracker, sweepIdOf } from './followups.mjs';
 import { FillContextQueue, contextRow } from './fill-context.mjs';
-import { BookState, SweepDetector, bookSum, internalDislocation, pairedView } from './book.mjs';
+import { SweepDetector, bookSum, internalDislocation, pairedView } from './book.mjs';
 import { BookFeed } from './ws.mjs';
+import { MarketCapture } from './capture.mjs';
 import { Store, restoreSchedulableMarkets, walletDisciplineShares } from './store.mjs';
 import { GgbetTail } from './ggbet-tail.mjs';
 import { MappingTable } from './mapping.mjs';
 import { buildLinks, joinedRow, quoteFor } from './link.mjs';
 import { fetchActivity } from './wallets.mjs';
 import { fetchTrades } from './trades.mjs';
+import { dueTradeMarkets } from './trade-poll.mjs';
 import { UniverseJournal, universeRow } from './universe.mjs';
 import { fetchResolution } from './resolve.mjs';
 import { politeFetch, throttle } from './http.mjs';
@@ -37,6 +39,7 @@ const once = process.argv.includes('--once');
 const store = new Store(config.storage.dir, {
   onRotate: (day) => {
     for (const entry of schedule.live()) store.upsertMarket(entry.record, undefined, entry);
+    capture.checkpoint();
     console.error(`[store] rolled over to ${day}, re-registered ${schedule.liveSize} markets`);
   },
 });
@@ -71,12 +74,14 @@ const walletMarkets = new Map();
 let quota = new Map();
 /** condition id -> when its trade log was last pulled, to keep polling bounded. */
 const tradesPolledAt = new Map();
+const tradeMarkets = new Map();
+let tradesPolling = false;
+const scheduleDecisions = new Map();
 
 const now = () => new Date().toISOString();
 
 /** Record the book, and whatever the update did to it. */
-function record(book, before, trigger) {
-  const ts = now();
+function record(book, before, trigger, ts = now()) {
   const at = Date.parse(ts);
   const link = links.get(book.assetId);
   const ggbet = link ? ggbetByKey.get(link.ggbetKey) : null;
@@ -166,6 +171,14 @@ function relink() {
   return links.size;
 }
 
+const capture = new MarketCapture({ store, books,
+  pairOf: asset => schedule.pairOf(asset), onBook: record,
+  onForget: asset => detector.forget(asset), depthAbovePrice: config.sweep.depthAbovePrice,
+  enabled: config.capture.enabled,
+});
+capture.write('capture_start', { version: 1, wallets: config.wallets.addresses,
+  watch_prices: capture.prices, config });
+
 const feed = new BookFeed({
   ...config.book,
   onStatus: (text) => console.error(`[feed] ${text}`),
@@ -174,25 +187,10 @@ const feed = new BookFeed({
     console.error(`[feed] gap ${Math.round(gap.durationMs / 1000)}s over ${gap.assets} assets`);
     store.add('gaps', [gap.startedAt, gap.endedAt, gap.durationMs, gap.reason, gap.assets]);
   },
-  onMessage: (message) => {
-    counts.messages++;
-    if (message.event_type === 'book') {
-      const book = books.get(message.asset_id)
-        ?? new BookState(message.asset_id, { conditionId: message.market });
-      books.set(message.asset_id, book);
-      const before = SweepDetector.snapshot(book, config.sweep.depthAbovePrice);
-      book.applyBook(message);
-      record(book, before, 'book');
-      return;
-    }
-    if (message.event_type !== 'price_change') return; // last_trade_price is a print
-    for (const entry of message.price_changes ?? []) {
-      const book = books.get(entry.asset_id);
-      if (!book) continue; // no snapshot yet; the next `book` frame resyncs us
-      const before = SweepDetector.snapshot(book, config.sweep.depthAbovePrice);
-      book.applyPriceChange(entry, message.timestamp);
-      record(book, before, 'change');
-    }
+  onReset: (assets, reason, meta) => capture.reset(assets, reason, meta),
+  onBatch: (messages, meta) => {
+    counts.messages += messages.length;
+    capture.processBatch(messages, meta);
   },
 });
 
@@ -202,7 +200,20 @@ function heartbeat() {
 }
 
 /** Target-wallet fills, the only labelled examples available. */
+let walletsPolling = false;
 async function pollWallets() {
+  if (walletsPolling) return;
+  walletsPolling = true;
+  try {
+    await pollWalletsOnce();
+  } catch (err) {
+    console.error(`[wallets] ${err.message}`);
+  } finally {
+    walletsPolling = false;
+  }
+}
+
+async function pollWalletsOnce() {
   // condition id -> when the wallet last touched it, so a market it traded in
   // months ago is not taken up as if it were live.
   const markets = new Map();
@@ -225,7 +236,7 @@ async function pollWallets() {
     }
   }
   await followWallets(markets);
-  await pollTrades(markets.keys());
+  for (const [id,at] of markets) tradeMarkets.set(id, Math.max(tradeMarkets.get(id) ?? 0,at));
 }
 
 /**
@@ -290,17 +301,21 @@ async function followWallets(lastTraded) {
  * Markets per cycle are capped, so one round stays bounded however long the
  * wallet has been trading.
  */
-async function pollTrades(conditionIds) {
+async function pollTrades() {
+  if (tradesPolling) return;
+  tradesPolling = true;
+  try { await pollTradesOnce(); }
+  catch (err) { console.error(`[trades] ${err.message}`); }
+  finally { tradesPolling = false; }
+}
+
+async function pollTradesOnce() {
   const every = (config.trades?.intervalSeconds ?? 120) * 1000;
   const perCycle = config.trades?.marketsPerCycle ?? 25;
   const targets = new Set((config.wallets.addresses ?? []).map((a) => a.toLowerCase()));
 
-  let scanned = 0;
-  for (const conditionId of conditionIds) {
-    if (scanned >= perCycle) break;
-    if (Date.now() - (tradesPolledAt.get(conditionId) ?? 0) < every) continue;
+  for (const conditionId of dueTradeMarkets(tradeMarkets, tradesPolledAt, {every,limit:perCycle})) {
     tradesPolledAt.set(conditionId, Date.now());
-    scanned++;
     try {
       const { rows, truncated, takerShare, pages } = await fetchTrades(conditionId);
       const mine = rows.filter((row) => targets.has(row[3]));
@@ -380,6 +395,18 @@ function tick(at = Date.now()) {
     maxLivePerSport: config.schedule?.maxLivePerSport ?? Infinity,
     quota,
   });
+  for (const decision of schedule.decisions(at)) {
+    const serialized = JSON.stringify(decision);
+    if (scheduleDecisions.get(decision.conditionId) === serialized) continue;
+    scheduleDecisions.set(decision.conditionId, serialized);
+    capture.write('schedule_decision', decision, {receivedAt:new Date(at).toISOString()});
+    for (const row of universe.observe([schedule.entry(decision.conditionId).record], 'schedule:restored')) {
+      store.add('universe', universeRow(row));
+    }
+    const row = universe.decision(decision.conditionId, decision.status,
+      decision.releasedAt ?? new Date(at).toISOString());
+    if (row) store.add('universe', universeRow(row));
+  }
   for (const entry of removed) {
     const released = universe.release(entry.conditionId);
     if (released) store.add('universe', universeRow(released));
@@ -471,6 +498,7 @@ tick();
 relink();
 await pollWallets();
 if (once) {
+  await pollTrades();
   const segment = tracked.filter((r) => r.level === 'segment').length;
   console.log(`tracking ${tracked.length} markets (${segment} in-match), database ${store.path}`);
   console.log(`schedule: ${schedule.liveSize} live now, ${schedule.pendingSize} waiting for their game`);
@@ -495,6 +523,7 @@ if (once) {
   process.exit(0);
 }
 
+void pollTrades();
 const timers = [
   setInterval(() => discover().catch((err) => console.error(`[discovery] ${err.message}`)),
     config.gamma.intervalSeconds * 1000),
@@ -507,14 +536,17 @@ const timers = [
   setInterval(() => checkResolutions().catch((err) => console.error(`[resolve] ${err.message}`)),
     (config.schedule?.resolutionCheckOpenHorizonSeconds ?? 60) * 1000),
   setInterval(heartbeat, config.book.heartbeatSeconds * 1000),
+  setInterval(() => capture.checkpoint(), Math.max(5, config.capture.checkpointSeconds) * 1000),
   setInterval(relink, (config.ggbet.pollSeconds ?? 5) * 1000),
   setInterval(() => pollWallets(), (config.wallets.intervalSeconds ?? 25) * 1000),
+  setInterval(() => pollTrades(), (config.trades?.intervalSeconds ?? 120) * 1000),
   // Where the wallets work shifts between days, not between minutes.
   setInterval(() => { quota = walletDisciplineShares(config.storage.dir); }, 24 * 3600 * 1000),
   setInterval(() => {
     console.error(`[status] ${books.size} books | ${counts.rows} rows | ${counts.joined} joined` +
       ` | ${counts.sweeps} sweeps (${counts.followups} horizons) | ${counts.gaps} gaps` +
       ` | ${links.size} linked | ${counts.trades} trades` +
+      ` | journal ${capture.enabled ? capture.seq : 'off'}` +
       ` | live ${schedule.liveSize}/waiting ${schedule.pendingSize}` +
       ` | ${counts.observed} seen in play | ${counts.contexts} fills in context` +
       `${counts.unwatchableFills ? ` (${counts.unwatchableFills} fills in markets` +

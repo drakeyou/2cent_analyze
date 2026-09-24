@@ -110,7 +110,7 @@ export function contextRow(job, store, now = Date.now()) {
 
   return [
     job.ts, job.assetId, job.conditionId, job.wallet, job.side, job.price, job.size,
-    store.fillOrdinal(job.assetId, job.side, job.ts),
+    store.fillOrdinal(job.assetId, job.side, job.ts, job.wallet),
     sample(minus60, 60)?.best_bid ?? null,
     sample(minus10, 10)?.best_bid ?? null,
     sample(minus1, 1)?.best_bid ?? null,

@@ -80,6 +80,14 @@ export class BookState {
     return out;
   }
 
+  /** Complete local replay anchor. A checkpoint does not refresh lastUpdate. */
+  snapshot() {
+    const levels = side => [...side].map(([p, size]) => ({ price: toPrice(p), size }));
+    return { event_type: 'book', asset_id: this.assetId, market: this.conditionId,
+      timestamp: this.lastUpdate, tick_size: this.tickSize,
+      bids: levels(this.#bids), asks: levels(this.#asks) };
+  }
+
   /** Total resting bid size strictly above a price, for the depth-collapse rule. */
   bidDepthAbove(price) {
     const floor = key(price);

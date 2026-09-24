@@ -57,6 +57,7 @@ assert.equal(skipped.length, 0);
 assert.deepEqual(schedule.refresh(discovered).added, [], 'not subscribed on discovery');
 assert.equal(schedule.liveSize, 0);
 assert.equal(schedule.pendingSize, 1);
+assert.equal(schedule.decisions(discovered)[0].status, 'awaiting subscription window');
 
 // This is the regression that made the whole collection unusable: the market
 // falls out of Gamma's page about an hour after it appears, and used to be
@@ -69,6 +70,7 @@ assert.equal(schedule.refresh(game - 11 * MINUTE).added.length, 0);
 const opened = schedule.refresh(game - 10 * MINUTE);
 assert.deepEqual(opened.added.map((e) => e.conditionId), ['c1']);
 assert.equal(schedule.liveSize, 1);
+assert.equal(schedule.decisions(game)[0].status, 'subscribed');
 assert.deepEqual(schedule.assetIds(), ['a', 'b'], 'both tokens are subscribed');
 assert.equal(schedule.conditionOf('b'), 'c1');
 
@@ -300,3 +302,12 @@ assert.deepEqual(late.refresh(game + 20 * HOUR).added, []);
 assert.equal(late.entry('c5').releaseReason, 'window passed unwatched');
 
 console.log('all schedule tests passed');
+
+// Capacity denial and expiry without a subscription must be visible in the audit.
+const auditSchedule = new MarketSchedule({leadMinutes:10});
+auditSchedule.observe([cs2()], game);
+auditSchedule.refresh(game, {maxLive:0});
+assert.equal(auditSchedule.decisions(game)[0].status, 'capacity');
+auditSchedule.refresh(game+7*HOUR);
+assert.equal(auditSchedule.decisions(game+7*HOUR)[0].status, 'window passed unwatched');
+assert.equal(auditSchedule.decisions(game+7*HOUR)[0].subscribedAt, null);

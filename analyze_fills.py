@@ -6,7 +6,7 @@
 
 Joins target-fills.csv to pm-resolutions.csv and reports what each position
 actually returned. The join is on asset_id, which is the resolution file's
-token_id: a position is one outcome token, and its fate is that token's payout.
+token_id: a position is one wallet's holding of one outcome token.
 
 The point of the resolution join is that most positions are never sold. Without
 knowing whether an unsold position expired worthless or was redeemed at a
@@ -24,6 +24,7 @@ from collections import Counter, defaultdict
 
 # Shared so the two scripts cannot disagree about what a timestamp is.
 from analyze import parse_timestamp
+from trade_identity import unique_fills
 
 TOLERANCE = 1.001  # sells may exceed buys by rounding, not by a position
 MODES = ("sold", "partial_won", "partial_lost", "held_won", "held_lost")
@@ -71,10 +72,10 @@ def load_resolutions(path):
 
 
 def build_positions(fills):
-    """One position per outcome token, in time order."""
+    """One position per wallet AND outcome token, in time order."""
     positions = defaultdict(list)
-    for row in fills:
-        positions[row["asset_id"]].append(row)
+    for row in unique_fills(fills):
+        positions[(row['wallet'].lower(), row["asset_id"])].append(row)
     for trades in positions.values():
         trades.sort(key=lambda r: r["ts"])
     return positions
@@ -184,10 +185,14 @@ def main():
     parser.add_argument("--gaps-out", default="pm-position-gaps.csv")
     args = parser.parse_args()
 
-    fills = read_csv(args.fills)
+    raw_fills = read_csv(args.fills)
+    fills = unique_fills(raw_fills)
     by_token, _ = load_resolutions(args.resolutions)
     positions = [summarize(asset, trades, by_token.get(asset))
-                 for asset, trades in build_positions(fills).items()]
+                 for (_, asset), trades in build_positions(fills).items()]
+
+    if len(raw_fills) != len(fills):
+        print(f"Removed {len(raw_fills) - len(fills)} duplicate daily fill records")
 
     print(f"{len(fills)} fills over {len(positions)} positions"
           f", {len(by_token)} outcome tokens resolved\n")
@@ -196,10 +201,10 @@ def main():
     broken = [p for p in positions if not p["complete"]]
     with open(args.gaps_out, "w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["asset_id", "condition_id", "buy_size", "sell_size", "sold_size",
+        writer.writerow(["wallet", "asset_id", "condition_id", "buy_size", "sell_size", "sold_size",
                          "first_side", "reason", "incomplete", "cost", "revenue"])
         for p in broken:
-            writer.writerow([p["asset_id"], p["condition_id"], p["buy_size"], p["sell_size"],
+            writer.writerow([p["wallet"], p["asset_id"], p["condition_id"], p["buy_size"], p["sell_size"],
                              p["sold_size"], "BUY" if p["buys"] and p["opened"] else "SELL",
                              p["reason"], p["incomplete"], round(p["cost"], 4),
                              None if p["revenue"] is None else round(p["revenue"], 4)])

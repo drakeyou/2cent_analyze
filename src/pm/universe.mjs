@@ -17,10 +17,9 @@ export class UniverseJournal {
   /**
    * Note every market a discovery round considered.
    *
-   * A row is written once and never rewritten except for its release, so the
-   * reason has to be final when it is first recorded. Classification is only
-   * half of it: a market of the right discipline that cannot be dated is not
-   * watched either, and `alsoSkipped` is how the scheduler says so.
+   * Discovery records eligibility. Actual subscription/capacity/window decisions
+   * update the row later; the raw schedule journal preserves their history.
+   * `alsoSkipped` supplies the scheduler's reason when a market cannot be dated.
    *
    * @param {object[]} records  classified markets, tracked or not
    * @param {string} discoveredVia  which query surfaced them
@@ -36,9 +35,9 @@ export class UniverseJournal {
         ts: new Date().toISOString(),
         conditionId: record.conditionId,
         discoveredVia,
-        subscribed: reason === null,
+        subscribed: false,
         unsubscribedAt: null,
-        reasonSkipped: reason ?? '',
+        reasonSkipped: reason ?? 'awaiting subscription window',
         question: record.question ?? '',
         sport: record.sport ?? '',
         level: record.level ?? '',
@@ -48,6 +47,22 @@ export class UniverseJournal {
       fresh.push(row);
     }
     return fresh;
+  }
+
+  /** Actual scheduler decision; eligibility alone never means subscribed. */
+  decision(conditionId, status, at = new Date().toISOString()) {
+    const row = this.#seen.get(conditionId);
+    if (!row) return null;
+    const before = JSON.stringify(row);
+    if (status === 'subscribed') {
+      row.subscribed = true; // ever subscribed, not current socket health
+      row.unsubscribedAt = null;
+      row.reasonSkipped = '';
+    } else if (!row.subscribed) row.reasonSkipped = status;
+    if (status === 'resolved' || status === 'past the hold window' || status === 'window passed unwatched') {
+      row.unsubscribedAt = at;
+    }
+    return JSON.stringify(row) === before ? null : row;
   }
 
   /** A market that closed or left the discovery window. */

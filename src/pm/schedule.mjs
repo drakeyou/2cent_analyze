@@ -251,9 +251,8 @@ export class MarketSchedule {
         this.#live.add(entry.conditionId);
         const [a, b] = entry.record.tokens;
         for (const assetId of entry.record.tokens) this.#assets.set(assetId, entry.conditionId);
-        // Both tokens of a binary market are subscribed, and their prices are
-        // tied: P(a) + P(b) = 1. Knowing the twin is what turns the pair into a
-        // fair-value estimate, so the link is kept alongside the subscription.
+        // Keep both outcomes for matching and liquidity reconstruction. A
+        // complementary quote may mirror the same order, not independent fair value.
         if (a && b) {
           this.#pairs.set(a, b);
           this.#pairs.set(b, a);
@@ -363,6 +362,23 @@ export class MarketSchedule {
   /** Records under subscription right now. */
   live() {
     return [...this.#live].map((id) => this.#entries.get(id));
+  }
+
+  /** Decision snapshots for a change-only audit trail, including unwatched releases. */
+  decisions(now = Date.now()) {
+    return [...this.#entries.values()].map(entry => ({
+      conditionId: entry.conditionId,
+      status: entry.releasedAt ? entry.releaseReason
+        : this.#live.has(entry.conditionId) ? 'subscribed'
+        : now < entry.subscribeAt ? 'awaiting subscription window'
+        : entry.deferredForCapacity ? 'capacity' : 'pending',
+      source: entry.source,
+      subscribeAt: entry.subscribeAt,
+      holdUntil: Number.isFinite(entry.holdUntil) ? entry.holdUntil : null,
+      gameStart: entry.gameStart,
+      subscribedAt: entry.subscribedAt,
+      releasedAt: entry.releasedAt,
+    }));
   }
 
   /** Every asset id under subscription, two per market. */
